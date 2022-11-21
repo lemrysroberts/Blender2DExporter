@@ -15,12 +15,19 @@ OUTPUT_DIRECTORY = 'render'
 
 #---------------------------------------------------------------------------------------------------------------
 
-# Mapping between Blender render-layer IDs and our desired file output names
-# i.e. Left is a fixed Blender name, right is ours
-render_layer_output_dict = {
-	'Depth' : 'depth',
-	'Normal' : 'normal',
-	'DiffCol' : 'diffuse',
+output_names = {
+	'depth',
+	'normal',
+	'diffuse'
+}
+
+# Optional channels from the mesh material that should be output using AOVs
+# See https://docs.blender.org/manual/en/latest/render/shader_nodes/output/aov.html
+
+# Key - Blender's name for the required channel in the Principled BSDF
+# Value - Output name of the channel when exporting
+optional_aov_name_dict = {
+	'Roughness' : 'roughness'
 }
 
 #---------------------------------------------------------------------------------------------------------------
@@ -148,6 +155,22 @@ def RenderScene():
 		view_layer.use_pass_normal = True
 		view_layer.use_pass_z = True
 		view_layer.use_pass_ambient_occlusion = True
+		
+		# Create any new AOVs that may be missing
+		for _, aov_name in optional_aov_name_dict.items():
+			aov_output_exists = False
+
+			# Check whether the AOV already exists
+			for aov in view_layer.aovs:
+				if aov.name == aov_name:
+					aov_output_exists = True
+					break
+
+			# Create the AOV if it is missing
+			if not aov_output_exists:
+				bpy.ops.scene.view_layer_add_aov()
+				view_layer.active_aov.name = aov_name
+
 
 	# Set up the render engine
 	scene.render.engine = 'CYCLES'          # Set the render-engine to Cycles for all the lovely high-quality render layers
@@ -224,9 +247,8 @@ def render(render_prefix, render_params):
 	output_node.layer_slots.clear()
 
 	# Add a new slot for each file-output type and link it to the relevant render-layer node
-	for input, output in render_layer_output_dict.items():
-		file_input = output_node.layer_slots.new(render_prefix + output)
-		tree.links.new(render_layer_node.outputs[input], file_input)
+	for output_name in output_names:
+		output_node.layer_slots.new(render_prefix + output_name)
 
 	# Add a node to remap the z range of the depth target
 	depth_remap_node = bpy.types.CompositorNodeMapRange(tree.nodes.new(type = 'CompositorNodeMapRange'))
@@ -288,6 +310,19 @@ def render(render_prefix, render_params):
 	tree.links.new(normal_multiply_node.outputs[0], normal_gamma_node.inputs[0])
 	tree.links.new(normal_gamma_node.outputs[0], output_node.inputs[render_prefix + 'normal'])
 
+	# Material properties are not available as render-layers in Cycles, so the script can 
+	# use AOVs (Arbitrary Output Variables) to forward material properties to the renderer output
+	#
+	# This checks whether the optional material properties are connected in each meshes shading graph.
+	# If a property is hooked up (e.g. Roughness), then an additional link is made from the property input
+	# to an AOV output with a matching name.
+	# That AOV output is then picked up in the compositor and output along with the other render outputs
+	for bsdf_name, aov_name in optional_aov_name_dict.items():
+		aov_required = CreateShadingAOVIfRequired(bsdf_name, aov_name)
+		if aov_required:
+			output_node.layer_slots.new(render_prefix + aov_name)
+			tree.links.new(render_layer_node.outputs[aov_name], output_node.inputs[render_prefix + aov_name])
+
 	# Render
 	bpy.ops.render.render()
 
@@ -299,7 +334,15 @@ def SanitizeFilenames(render_directory, render_prefix):
 
 	# Iterate over created textures removing the annoying 0001/0000 frame suffixes Blender adds
 	# Also prepends the textures with the Blender filename
-	for _, output in render_layer_output_dict.items():
+	for output in output_names:
+		for file in files:
+			if file.startswith(render_prefix + output):
+				old_path = os.path.join(render_directory, file)
+				new_path = os.path.join(render_directory, render_prefix + filename + '_' + output + '.png')
+				os.replace(old_path, new_path)
+
+	# TODO: Just append output_names and the AOV values, then run this loop once
+	for _, output in optional_aov_name_dict.items():
 		for file in files:
 			if file.startswith(render_prefix + output):
 				old_path = os.path.join(render_directory, file)
@@ -328,7 +371,45 @@ def GetSceneBounds():
 				max_bounds.z = max(max_bounds.z, corner.z)
 	
 	return min_bounds, max_bounds
-				
+
+#---------------------------------------------------------------------------------------------------------------
+
+def CreateShadingAOVIfRequired(bsdf_name, aov_name):
+	aov_required = False
+
+	# Iterate all visible meshes
+	for scene_object in bpy.data.objects:
+		if scene_object.type == 'MESH' and scene_object.visible_get():
+
+			# Grab their shading tree and have a look at the Principled BSDF node, if present
+			tree = scene_object.material_slots[0].material.node_tree
+			bsdf_node = tree.nodes.get("Principled BSDF")
+			if bsdf_node is not None:
+
+				# Check the input for the requested AOV, using the specified BSDF name
+				aov_input = bsdf_node.inputs[bsdf_name]
+				if aov_input is not None and len(aov_input.links) > 0:
+
+					# The property is linked, so an AOV is required
+					aov_required = True
+
+					# Search for an existing link to a valid AOV output node
+					source_node = aov_input.links[0].from_node
+					aov_exists = False
+					for output_node in source_node.outputs:
+						for link in output_node.links:
+							to_node = link.to_node
+							if type(to_node) is bpy.types.ShaderNodeOutputAOV and to_node.name == aov_name:
+								aov_exists = True
+					
+					# If no AOV exists, then create one
+					if not aov_exists:
+						new_aov_node = bpy.types.ShaderNodeOutputAOV(tree.nodes.new(type = 'ShaderNodeOutputAOV'))
+						new_aov_node.name = aov_name
+						tree.links.new(source_node.outputs[0], new_aov_node.inputs[0])
+
+	return aov_required
+
 #---------------------------------------------------------------------------------------------------------------
 
 if not bpy.data.is_saved:

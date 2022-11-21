@@ -34,6 +34,17 @@ Finally, the script executes a **Cycles** render and opens the output directory 
         * ***shrink_resolution_when_fitting*** = *True* - Output texture will be 512 x 256
         * ***shrink_resolution_when_fitting*** = *False* - Output texture will be 1024 x 512
 
+# Extended AOV support
+It's useful to be able to output material inputs from renders in order to support PBR workflows (Roughness, Metalness, etc.)
+
+Cycles does not support this by default, as it only provides final render elements, not the properties used to render those elements.
+
+In order to support output of material properties, the script uses Blender's [***Arbitrary Output Variables***](https://docs.blender.org/manual/en/latest/render/shader_nodes/output/aov.html). These allow a mesh's shading graph to directly forward values to output during compositing. 
+
+The script detects the usage of any user-defined inputs in each mesh's shading graph and creates a corresponding AOV to forward that information to the compositor. 
+
+Currently only **Roughness** is enabled by default. See ***optional_aov_name_dict*** (**Line 29**) for more information.
+
     
 # Misc
 * Render settings are not maintained by the script, so any manual rendering configuration will be overwritten by the script.
